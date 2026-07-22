@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-stacks
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/YOUR_ORG/YOUR_PLATFORM_REPO.git
+    targetRevision: main
+    path: examples
+    directory:
+      recurse: false
+      include: "*.yaml"
+      exclude: "*.example.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    syncOptions:
+      - ServerSideApply=true
+
+

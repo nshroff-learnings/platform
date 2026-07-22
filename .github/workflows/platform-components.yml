@@ -1,0 +1,118 @@
+name: Platform Components
+
+on:
+  pull_request:
+    paths:
+      - "argocd/**"
+      - "crossplane/**"
+      - "examples/**"
+      - "docs/**"
+      - ".github/workflows/platform-components.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "argocd/**"
+      - "crossplane/**"
+      - "examples/**"
+      - "docs/**"
+      - ".github/workflows/platform-components.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target platform environment"
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - qa
+      sync:
+        description: "Run argocd app sync after validation"
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  ARGOCD_APP_NAME: platform-root
+
+jobs:
+  validate:
+    name: Validate Platform Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install validators
+        run: python -m pip install --upgrade yamllint
+      - name: YAML lint
+        run: |
+          yamllint -d "{extends: default, rules: {document-start: disable, line-length: disable, comments-indentation: disable, truthy: disable}}" \
+            argocd crossplane examples
+      - name: Check platform repo URL placeholders
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.sync == true }}
+        run: |
+          if grep -R "YOUR_ORG\|YOUR_PLATFORM_REPO" argocd crossplane examples; then
+            echo "Replace platform repository placeholders before syncing."
+            exit 1
+          fi
+
+  argocd_diff:
+    name: Argo CD Diff
+    runs-on: ubuntu-latest
+    needs: validate
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Argo CD inputs
+        run: |
+          test -n "${{ secrets.ARGOCD_SERVER }}" || { echo "Missing ARGOCD_SERVER secret"; exit 1; }
+          test -n "${{ secrets.ARGOCD_AUTH_TOKEN }}" || { echo "Missing ARGOCD_AUTH_TOKEN secret"; exit 1; }
+      - name: Install Argo CD CLI
+        run: |
+          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/argocd
+      - name: Diff platform root app
+        continue-on-error: true
+        run: |
+          argocd app diff "$ARGOCD_APP_NAME" \
+            --server "${{ secrets.ARGOCD_SERVER }}" \
+            --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}" \
+            --grpc-web
+
+  argocd_sync:
+    name: Argo CD Sync
+    runs-on: ubuntu-latest
+    needs: argocd_diff
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.sync == true }}
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Install Argo CD CLI
+        run: |
+          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/argocd
+      - name: Sync platform root app
+        run: |
+          argocd app sync "$ARGOCD_APP_NAME" \
+            --server "${{ secrets.ARGOCD_SERVER }}" \
+            --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}" \
+            --grpc-web \
+            --prune \
+            --timeout 600
+      - name: Wait for healthy platform root app
+        run: |
+          argocd app wait "$ARGOCD_APP_NAME" \
+            --server "${{ secrets.ARGOCD_SERVER }}" \
+            --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}" \
+            --grpc-web \
+            --health \
+            --sync \
+            --timeout 600

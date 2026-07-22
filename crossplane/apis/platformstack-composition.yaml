@@ -1,0 +1,447 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: eks-addons-platform-stack
+  labels:
+    provider: aws
+    platform.example.com/type: eks-addons
+spec:
+  compositeTypeRef:
+    apiVersion: platform.example.com/v1alpha1
+    kind: XPlatformStack
+  mode: Pipeline
+  pipeline:
+    - step: render-platform-addons
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          options:
+            - missingkey=default
+          template: |
+            {{- $xr := .observed.composite.resource -}}
+            {{- $p := $xr.spec.parameters -}}
+            {{- $target := $p.targetClusterName -}}
+            {{- $providerName := default $target $p.providerConfigName -}}
+            {{- $secretNamespace := default "crossplane-system" $p.targetClusterSecretNamespace -}}
+            {{- $secretName := $p.targetClusterSecretName -}}
+            {{- $argocd := $p.addons.argocd -}}
+            {{- $rollouts := $p.addons.argoRollouts -}}
+            {{- $istio := $p.addons.istio -}}
+            {{- $kyverno := $p.addons.kyverno -}}
+            {{- $twistlock := $p.addons.twistlock -}}
+            {{- $calico := $p.addons.calico -}}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha1
+            kind: ProviderConfig
+            metadata:
+              name: {{ $providerName }}-kubernetes
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: target-kubernetes-providerconfig
+            spec:
+              credentials:
+                source: Secret
+                secretRef:
+                  namespace: {{ $secretNamespace }}
+                  name: {{ $secretName }}
+                  key: kubeconfig
+            ---
+            apiVersion: helm.crossplane.io/v1beta1
+            kind: ProviderConfig
+            metadata:
+              name: {{ $providerName }}-helm
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: target-helm-providerconfig
+            spec:
+              credentials:
+                source: Secret
+                secretRef:
+                  namespace: {{ $secretNamespace }}
+                  name: {{ $secretName }}
+                  key: kubeconfig
+            {{- if ne $argocd.enabled false }}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              name: {{ $target }}-argocd-namespace
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: argocd-namespace
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-kubernetes
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Namespace
+                  metadata:
+                    name: {{ default "argocd" $argocd.namespace }}
+                    labels:
+                      app.kubernetes.io/managed-by: crossplane
+                      platform.example.com/addon: argocd
+                      istio-injection: disabled
+            ---
+            apiVersion: helm.crossplane.io/v1beta1
+            kind: Release
+            metadata:
+              name: {{ $target }}-argocd
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: argocd-release
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-helm
+              forProvider:
+                namespace: {{ default "argocd" $argocd.namespace }}
+                chart:
+                  name: argo-cd
+                  repository: https://argoproj.github.io/argo-helm
+                  version: {{ default "8.1.3" $argocd.chartVersion | quote }}
+                values:
+                  global:
+                    domain: {{ default "argocd.example.com" $argocd.domain | quote }}
+                  configs:
+                    cm:
+                      application.resourceTrackingMethod: annotation
+                  server:
+                    replicas: {{ default 2 $argocd.replicas }}
+                  repoServer:
+                    replicas: {{ default 2 $argocd.replicas }}
+            {{- end }}
+            {{- if ne $rollouts.enabled false }}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              name: {{ $target }}-argo-rollouts-namespace
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: argo-rollouts-namespace
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-kubernetes
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Namespace
+                  metadata:
+                    name: {{ default "argo-rollouts" $rollouts.namespace }}
+                    labels:
+                      app.kubernetes.io/managed-by: crossplane
+                      platform.example.com/addon: argo-rollouts
+                      istio-injection: disabled
+            ---
+            apiVersion: helm.crossplane.io/v1beta1
+            kind: Release
+            metadata:
+              name: {{ $target }}-argo-rollouts
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: argo-rollouts-release
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-helm
+              forProvider:
+                namespace: {{ default "argo-rollouts" $rollouts.namespace }}
+                chart:
+                  name: argo-rollouts
+                  repository: https://argoproj.github.io/argo-helm
+                  version: {{ default "2.40.0" $rollouts.chartVersion | quote }}
+                values:
+                  controller:
+                    replicas: 2
+                    metrics:
+                      enabled: true
+            {{- end }}
+            {{- if ne $istio.enabled false }}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              name: {{ $target }}-istio-system-namespace
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: istio-system-namespace
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-kubernetes
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Namespace
+                  metadata:
+                    name: {{ default "istio-system" $istio.namespace }}
+                    labels:
+                      app.kubernetes.io/managed-by: crossplane
+                      platform.example.com/addon: istio
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              name: {{ $target }}-istio-ingress-namespace
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: istio-ingress-namespace
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-kubernetes
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Namespace
+                  metadata:
+                    name: {{ default "istio-ingress" $istio.ingressGatewayNamespace }}
+                    labels:
+                      app.kubernetes.io/managed-by: crossplane
+                      platform.example.com/addon: istio
+            ---
+            apiVersion: helm.crossplane.io/v1beta1
+            kind: Release
+            metadata:
+              name: {{ $target }}-istio-base
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: istio-base-release
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-helm
+              forProvider:
+                namespace: {{ default "istio-system" $istio.namespace }}
+                chart:
+                  name: base
+                  repository: https://istio-release.storage.googleapis.com/charts
+                  version: {{ default "1.30.1" $istio.chartVersion | quote }}
+            ---
+            apiVersion: helm.crossplane.io/v1beta1
+            kind: Release
+            metadata:
+              name: {{ $target }}-istiod
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: istiod-release
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-helm
+              forProvider:
+                namespace: {{ default "istio-system" $istio.namespace }}
+                chart:
+                  name: istiod
+                  repository: https://istio-release.storage.googleapis.com/charts
+                  version: {{ default "1.30.1" $istio.chartVersion | quote }}
+                values:
+                  meshConfig:
+                    enableTracing: true
+                    accessLogFile: /dev/stdout
+            ---
+            apiVersion: helm.crossplane.io/v1beta1
+            kind: Release
+            metadata:
+              name: {{ $target }}-istio-ingress
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: istio-ingress-release
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-helm
+              forProvider:
+                namespace: {{ default "istio-ingress" $istio.ingressGatewayNamespace }}
+                chart:
+                  name: gateway
+                  repository: https://istio-release.storage.googleapis.com/charts
+                  version: {{ default "1.30.1" $istio.chartVersion | quote }}
+            {{- end }}
+            {{- if ne $kyverno.enabled false }}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              name: {{ $target }}-kyverno-namespace
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: kyverno-namespace
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-kubernetes
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Namespace
+                  metadata:
+                    name: {{ default "kyverno" $kyverno.namespace }}
+                    labels:
+                      app.kubernetes.io/managed-by: crossplane
+                      platform.example.com/addon: kyverno
+                      istio-injection: disabled
+            ---
+            apiVersion: helm.crossplane.io/v1beta1
+            kind: Release
+            metadata:
+              name: {{ $target }}-kyverno
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: kyverno-release
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-helm
+              forProvider:
+                namespace: {{ default "kyverno" $kyverno.namespace }}
+                chart:
+                  name: kyverno
+                  repository: https://kyverno.github.io/kyverno/
+                  version: {{ default "3.5.1" $kyverno.chartVersion | quote }}
+                values:
+                  admissionController:
+                    replicas: {{ default 2 $kyverno.admissionControllerReplicas }}
+                  backgroundController:
+                    replicas: 2
+                  cleanupController:
+                    replicas: 2
+                  reportsController:
+                    replicas: 2
+            {{- end }}
+            {{- if eq $twistlock.enabled true }}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              name: {{ $target }}-twistlock-namespace
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: twistlock-namespace
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-kubernetes
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Namespace
+                  metadata:
+                    name: {{ default "twistlock" $twistlock.namespace }}
+                    labels:
+                      app.kubernetes.io/managed-by: crossplane
+                      platform.example.com/addon: twistlock
+                      istio-injection: disabled
+            ---
+            apiVersion: helm.crossplane.io/v1beta1
+            kind: Release
+            metadata:
+              name: {{ $target }}-twistlock-defender
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: twistlock-defender-release
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-helm
+              forProvider:
+                namespace: {{ default "twistlock" $twistlock.namespace }}
+                chart:
+                  name: {{ default "twistlock-defender" $twistlock.chartName | quote }}
+                  repository: {{ $twistlock.chartRepository | quote }}
+                  version: {{ $twistlock.chartVersion | quote }}
+                values:
+                  console:
+                    address: {{ $twistlock.consoleAddress | quote }}
+            {{- end }}
+            {{- if ne $calico.enabled false }}
+            {{- if ne $calico.installOperator false }}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              name: {{ $target }}-tigera-operator-namespace
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: tigera-operator-namespace
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-kubernetes
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Namespace
+                  metadata:
+                    name: {{ default "tigera-operator" $calico.operatorNamespace }}
+                    labels:
+                      app.kubernetes.io/managed-by: crossplane
+                      platform.example.com/addon: calico
+                      istio-injection: disabled
+            ---
+            apiVersion: helm.crossplane.io/v1beta1
+            kind: Release
+            metadata:
+              name: {{ $target }}-tigera-operator
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: tigera-operator-release
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-helm
+              forProvider:
+                namespace: {{ default "tigera-operator" $calico.operatorNamespace }}
+                chart:
+                  name: tigera-operator
+                  repository: https://docs.tigera.io/calico/charts
+                  version: {{ default "v3.30.0" $calico.operatorChartVersion | quote }}
+            {{- end }}
+            {{- $protectedNamespaces := default (list "default") $calico.protectedNamespaces }}
+            {{- range $ns := $protectedNamespaces }}
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              name: {{ $target }}-{{ $ns }}-default-deny
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: calico-default-deny-{{ $ns }}
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-kubernetes
+              forProvider:
+                manifest:
+                  apiVersion: networking.k8s.io/v1
+                  kind: NetworkPolicy
+                  metadata:
+                    name: default-deny
+                    namespace: {{ $ns }}
+                  spec:
+                    podSelector: {}
+                    policyTypes:
+                      - Ingress
+                      - Egress
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              name: {{ $target }}-{{ $ns }}-allow-dns
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: calico-allow-dns-{{ $ns }}
+            spec:
+              providerConfigRef:
+                name: {{ $providerName }}-kubernetes
+              forProvider:
+                manifest:
+                  apiVersion: networking.k8s.io/v1
+                  kind: NetworkPolicy
+                  metadata:
+                    name: allow-dns-egress
+                    namespace: {{ $ns }}
+                  spec:
+                    podSelector: {}
+                    policyTypes:
+                      - Egress
+                    egress:
+                      - to:
+                          - namespaceSelector:
+                              matchLabels:
+                                kubernetes.io/metadata.name: kube-system
+                            podSelector:
+                              matchLabels:
+                                k8s-app: kube-dns
+                        ports:
+                          - protocol: UDP
+                            port: 53
+                          - protocol: TCP
+                            port: 53
+            {{- end }}
+            {{- end }}
+            ---
+            apiVersion: platform.example.com/v1alpha1
+            kind: XPlatformStack
+            status:
+              observed:
+                targetClusterName: {{ $target | quote }}
+                kubernetesProviderConfig: {{ printf "%s-kubernetes" $providerName | quote }}
+                helmProviderConfig: {{ printf "%s-helm" $providerName | quote }}
+    - step: automatically-detect-ready-resources
+      functionRef:
+        name: function-auto-ready
+
+

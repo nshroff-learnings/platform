@@ -1,0 +1,62 @@
+configs:
+  cm:
+    application.resourceTrackingMethod: annotation
+    resource.customizations: |
+      "*.crossplane.io/*":
+        health.lua: |
+          health_status = { status = "Progressing", message = "Provisioning ..." }
+          local has_no_status = {
+            Composition = true,
+            CompositionRevision = true,
+            DeploymentRuntimeConfig = true,
+            ProviderConfig = true,
+            ProviderConfigUsage = true
+          }
+          if obj.status == nil or next(obj.status) == nil then
+            if has_no_status[obj.kind] then
+              return { status = "Healthy", message = "Resource is up-to-date." }
+            end
+            return health_status
+          end
+          if obj.status.conditions == nil then
+            return health_status
+          end
+          for _, condition in ipairs(obj.status.conditions) do
+            if condition.type == "Ready" and condition.status == "True" then
+              return { status = "Healthy", message = "Resource is ready." }
+            end
+            if condition.type == "Synced" and condition.status == "False" then
+              return { status = "Degraded", message = condition.message }
+            end
+          end
+          return health_status
+      "*.upbound.io/*":
+        health.lua: |
+          health_status = { status = "Progressing", message = "Provisioning ..." }
+          if obj.status == nil or next(obj.status) == nil then
+            if obj.kind == "ProviderConfig" or obj.kind == "ClusterProviderConfig" or obj.kind == "ProviderConfigUsage" then
+              return { status = "Healthy", message = "Resource is up-to-date." }
+            end
+            return health_status
+          end
+          if obj.status.conditions == nil then
+            return health_status
+          end
+          for _, condition in ipairs(obj.status.conditions) do
+            if condition.type == "Ready" and condition.status == "True" then
+              return { status = "Healthy", message = "Resource is ready." }
+            end
+            if condition.type == "Synced" and condition.status == "False" then
+              return { status = "Degraded", message = condition.message }
+            end
+          end
+          return health_status
+server:
+  replicas: 2
+controller:
+  replicas: 1
+repoServer:
+  replicas: 2
+applicationSet:
+  replicas: 2
+
