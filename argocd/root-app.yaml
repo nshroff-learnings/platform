@@ -6,7 +6,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/YOUR_ORG/YOUR_PLATFORM_REPO.git
+    repoURL: https://github.com/nshroff-learnings/platform.git
     targetRevision: main
     path: argocd/apps
     directory:
